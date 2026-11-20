@@ -18,11 +18,13 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo fmt -- --check
       - run: cargo test --test fuzz --locked -- 100000
-      - run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
       - name: Verify zero third-party Rust packages
-        run: test "$(python3 -c 'import json; print(len(json.load(open("Cargo.lock"))["package"]))')" = 1
+        run: cargo metadata --locked --format-version 1 | python3 -c 'import json,sys; m=json.load(sys.stdin); assert all(p["source"] is None and not p["dependencies"] for p in m["packages"])'
   sanitizers:
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        sanitizer: [address, undefined]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -30,8 +32,10 @@ jobs:
           components: rust-src
       - name: AddressSanitizer and UndefinedBehaviorSanitizer
         env:
-          RUSTFLAGS: -Zsanitizer=address,undefined -Cforce-frame-pointers=yes
-          RUSTDOCFLAGS: -Zsanitizer=address,undefined -Cforce-frame-pointers=yes
+          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -Cforce-frame-pointers=yes
+          RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -Cforce-frame-pointers=yes
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
           cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --all-targets --locked
           cargo build -Zbuild-std --target x86_64-unknown-linux-gnu --locked
