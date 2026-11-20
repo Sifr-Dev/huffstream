@@ -7,41 +7,45 @@
 
 # sifr-inflate
 
-zero-dependency DEFLATE (RFC 1951) + gzip (RFC 1952) decompressor in Rust.
-stored/fixed/dynamic Huffman from scratch, 32 KiB window, CRC-32 + ISIZE
-verified — no zlib, no crates.
+Zero-dependency DEFLATE (RFC 1951) and gzip (RFC 1952) decoder in Rust. Stored,
+fixed, and dynamic Huffman blocks are implemented from scratch; CRC-32, ISIZE,
+and optional gzip header fields including FHCRC are verified. No zlib or
+third-party crates are used at runtime or build time.
 
 ```sh
-sifr-inflate file.gz           # decompress to stdout
-sifr-inflate file.gz out.bin
+cargo build --release
+./target/release/sifr-inflate file.gz              # stdout, 64 MiB output limit
+./target/release/sifr-inflate file.gz out.bin
+./target/release/sifr-inflate --max-output 1048576 file.gz -
+cat file.gz | ./target/release/sifr-inflate -      # fragmented stdin supported
 ```
 
-## evidence (this machine, 2026-11-17)
+The CLI buffers complete input and output before writing. It is not an
+incremental decoder. Exactly one gzip member is accepted: trailing bytes and
+concatenated members are rejected. Raw zlib streams are not supported. See
+[architecture](docs/architecture.md), [security and limits](SECURITY.md), and
+[release changes](CHANGELOG.md) for the actual contract.
 
-byte-exact vs `zcat` on 21 fixtures: text/binary/empty/unicode/repetitive/large
-(8 kB–160 kB), compression levels 1/6/9, plus a stored-block fixture built
-with `Z_NO_COMPRESSION` —
+## Verification
 
-```console
-OK   18 × gzip -1/-6/-9 fixtures (cmp with zcat)
-OK   large_stored.gz (stored blocks, 212 KB, byte-exact)
-$ ./sifr-inflate corrupt_deflate_payload.gz   # → CRC mismatch exit 1
-$ ./sifr-inflate corrupt_CRC_trailer.gz       # → CRC mismatch exit 1
-$ ./sifr-inflate corrupt_ISIZE_trailer.gz     # → ISIZE mismatch exit 1
-$ cargo test --release                        # 3 tests pass
-```
-
-## honest scope
-
-decompression only (no deflate compressor yet). gzip container format
-supported; raw zlib streams are not read (strip the zlib header/adler to use).
-
-## build
+Requires Rust and Python 3 (test oracle only):
 
 ```sh
-cargo build --release && cargo test --release
+cargo test --all-targets --locked
+cargo build --locked
+python3 tests/differential.py target/debug/sifr-inflate
+cargo clippy --all-targets --locked -- -D warnings
+cargo fmt -- --check
+cargo test --test fuzz --locked -- 100000
 ```
 
-## license
+The Python harness uses independent `zlib`/`gzip` compression to verify 93
+stored/fixed/dynamic/random fixtures, six fragmented-pipe chunk sizes, optional
+headers, truncations, corruption, output limits, trailing data, and 1000 seeded
+mutations. The Rust harness performs deterministic arbitrary-input/mutation
+fuzzing; it is not coverage-guided. CI additionally runs nightly ASan/UBSan.
+See [the verification workflow](.github/workflows/verification.yml).
 
-`MIT` — see `LICENSE`. built from zero.
+## License
+
+MIT — see [LICENSE](LICENSE). Built from zero.
