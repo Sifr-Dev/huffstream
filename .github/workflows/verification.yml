@@ -1,0 +1,43 @@
+name: DEFLATE verification
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo test --all-targets --locked
+      - run: cargo build --locked
+      - run: python3 tests/differential.py target/debug/sifr-inflate
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo fmt -- --check
+      - run: cargo test --test fuzz --locked -- 100000
+      - name: Verify zero third-party Rust packages
+        run: cargo metadata --locked --format-version 1 | python3 -c 'import json,sys; m=json.load(sys.stdin); assert all(p["source"] is None and not p["dependencies"] for p in m["packages"])'
+  sanitizers:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: AddressSanitizer and UndefinedBehaviorSanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -Cforce-frame-pointers=yes
+          RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -Cforce-frame-pointers=yes
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --all-targets --locked
+          cargo build -Zbuild-std --target x86_64-unknown-linux-gnu --locked
+          python3 tests/differential.py target/x86_64-unknown-linux-gnu/debug/sifr-inflate
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --test fuzz --locked -- 50000
