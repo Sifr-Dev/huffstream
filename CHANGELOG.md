@@ -9,7 +9,7 @@
 - Independent Python `zlib`/`gzip` differential fixtures across stored, fixed,
   dynamic, random, truncated, malformed, and corrupt streams.
 - Fragmented stdin coverage, deterministic dependency-free mutation fuzzing, and
-  stable/nightly sanitizer CI.
+  stable/nightly sanitizer CI (ASan/MSan) and a nightly Miri job.
 
 ### Fixed
 

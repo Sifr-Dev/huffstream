@@ -43,7 +43,7 @@ The Python harness uses independent `zlib`/`gzip` compression to verify 93
 stored/fixed/dynamic/random fixtures, six fragmented-pipe chunk sizes, optional
 headers, truncations, corruption, output limits, trailing data, and 1000 seeded
 mutations. The Rust harness performs deterministic arbitrary-input/mutation
-fuzzing; it is not coverage-guided. CI additionally runs nightly ASan/UBSan.
+fuzzing; it is not coverage-guided. CI additionally runs nightly ASan/MSan and Miri (Rust has no UBSan backend; Miri detects undefined behavior in Rust semantics).
 See [the verification workflow](.github/workflows/verification.yml).
 
 ## License
