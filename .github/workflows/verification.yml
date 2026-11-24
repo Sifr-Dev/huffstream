@@ -50,10 +50,16 @@ jobs:
     # Miri is an interpreter that detects undefined behavior in Rust terms
     # (aliasing, out-of-bounds, uninitialized reads, invalid values). It is the
     # closest real equivalent to UBSan for this crate.
+    #
+    # `cargo miri test` with no test target also runs the fuzz binary, which is
+    # a `harness = false` program defaulting to 20,000 iterations. Under Miri
+    # that takes many hours and is why this job kept being cancelled. Only the
+    # library unit tests run here; fuzzing stays in the native and sanitizer
+    # jobs, where it is fast.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: miri
-      - run: cargo miri test --locked
+          components: miri, rust-src
+      - run: cargo miri test --locked --lib
