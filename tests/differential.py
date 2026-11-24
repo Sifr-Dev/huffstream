@@ -66,6 +66,18 @@ def run(binary):
     assert zlib.decompress(mixed, -15) == mixed_data
     fixtures.append(("mixed-content", mixed_data, gzip_with_raw(mixed, mixed_data)))
 
+    # A dynamic block whose distance alphabet is entirely zero-length is legal
+    # when the block contains no back-references (RFC 1951 section 3.2.7).
+    # zlib's encoder does not currently emit this shape, so the bytes are fixed
+    # here rather than generated. The assertion below is zlib itself accepting
+    # the stream, which keeps the case honest if the oracle ever disagrees.
+    literal_only = bytes.fromhex(
+        "05800104000000400000000000000000000000001c"
+        "00000000000000000000000000000000000000c206")
+    assert zlib.decompress(literal_only, -15) == b"abc"
+    fixtures.append(("literal-only-empty-distance-tree", b"abc",
+                     gzip_with_raw(literal_only, b"abc")))
+
     for index in range(35):
         size = rng.randrange(0, 140000)
         data = rng.randbytes(size) if index % 2 else bytes(rng.randrange(256) for _ in range(size))
