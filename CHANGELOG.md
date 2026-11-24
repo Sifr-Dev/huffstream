@@ -13,6 +13,8 @@
 
 ### Fixed
 
+- Accept the all-zero distance alphabet that RFC 1951 allows in a literal-only
+  dynamic block; such streams were previously rejected as an incomplete tree.
 - Reject oversubscribed/invalid incomplete Huffman trees and missing end-of-block
   codes instead of allowing invalid compressed streams to run until EOF.
 - Check gzip optional-field boundaries, reserved flags, and FHCRC.
