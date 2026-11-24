@@ -47,6 +47,13 @@ struct Huffman {
 
 impl Huffman {
     fn from_lengths(lengths: &[u8]) -> Result<Self, String> {
+        Self::from_lengths_with(lengths, false)
+    }
+
+    /// `allow_empty` accepts the all-zero distance tree that RFC 1951 permits
+    /// for a block containing only literals. The resulting tree decodes no
+    /// symbol, so any distance reference still fails as invalid.
+    fn from_lengths_with(lengths: &[u8], allow_empty: bool) -> Result<Self, String> {
         let mut counts = [0u16; 16];
         for &length in lengths {
             if length > 15 {
@@ -62,7 +69,13 @@ impl Huffman {
                 return Err("over-subscribed Huffman tree".into());
             }
         }
-        if left > 0 && lengths.iter().filter(|&&length| length != 0).count() != 1 {
+        // RFC 1951 permits an incomplete code only in two cases: a distance
+        // tree with a single one-bit code, and a distance tree whose codes are
+        // all zero when the block contains no back-references. `allow_empty`
+        // selects the second case for the distance tree; the empty tree then
+        // decodes nothing, so any actual distance reference fails as invalid.
+        let used = lengths.iter().filter(|&&length| length != 0).count();
+        if left > 0 && !(allow_empty && used == 0) && used != 1 {
             return Err("incomplete Huffman tree".into());
         }
 
@@ -296,7 +309,7 @@ fn dynamic_trees(reader: &mut BitReader<'_>) -> Result<(Huffman, Huffman), Strin
     if lengths.get(256).copied().unwrap_or(0) == 0 {
         return Err("literal tree has no end-of-block code".into());
     }
-    let distance = Huffman::from_lengths(&lengths[literal_count..])?;
+    let distance = Huffman::from_lengths_with(&lengths[literal_count..], true)?;
     Ok((literal, distance))
 }
 
@@ -416,6 +429,32 @@ mod tests {
         assert!(Huffman::from_lengths(&[2, 2]).is_err());
         assert!(Huffman::from_lengths(&[1]).is_ok());
         assert!(Huffman::from_lengths(&[1, 1]).is_ok());
+        // An all-zero distance tree is only legal for the distance alphabet.
+        assert!(Huffman::from_lengths(&[0, 0, 0]).is_err());
+        assert!(Huffman::from_lengths_with(&[0, 0, 0], true).is_ok());
+    }
+
+    #[test]
+    fn literal_only_dynamic_block_accepts_empty_distance_tree() {
+        // Dynamic block: literals "abc" then end-of-block, with HDIST=1 and
+        // every distance code length zero. RFC 1951 permits this because the
+        // block contains no back-references. Both `zlib.decompress(raw, -15)`
+        // and Python's `gzip.decompress(member)` return b"abc" for these bytes,
+        // so rejecting the stream was a decoding bug, not hardening.
+        let raw: [u8; 42] = [
+            0x05, 0x80, 0x01, 0x04, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc2, 0x06,
+        ];
+        assert_eq!(inflate_raw(&raw, 64).unwrap().0, b"abc");
+        let member: [u8; 60] = [
+            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x05, 0x80, 0x01, 0x04,
+            0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc2, 0x06, 0xc2, 0x41, 0x24, 0x35,
+            0x03, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(decompress_gzip(&member, 64).unwrap(), b"abc");
     }
 
     #[test]
