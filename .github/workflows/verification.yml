@@ -1,0 +1,70 @@
+name: DEFLATE verification
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo test --all-targets --locked
+      - run: cargo build --locked
+      - run: python3 tests/differential.py target/debug/sifr-inflate
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo fmt -- --check
+      - run: cargo test --test fuzz --locked -- 100000
+      - name: Verify zero third-party Rust packages
+        run: cargo metadata --locked --format-version 1 | python3 -c 'import json,sys; m=json.load(sys.stdin); assert all(p["source"] is None and not p["dependencies"] for p in m["packages"])'
+
+  sanitizers:
+    # Rust has no `-Zsanitizer=undefined` (UBSan is a C/C++ runtime check);
+    # this job previously requested it and could therefore never pass. Memory
+    # safety is covered by AddressSanitizer and MemorySanitizer here, and
+    # undefined behavior in Rust semantics by the Miri job below.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, memory]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: ${{ matrix.sanitizer }} sanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -Cforce-frame-pointers=yes
+          ASAN_OPTIONS: detect_leaks=1
+        run: |
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --all-targets --locked
+          cargo build -Zbuild-std --target x86_64-unknown-linux-gnu --locked
+          python3 tests/differential.py target/x86_64-unknown-linux-gnu/debug/sifr-inflate
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --test fuzz --locked -- 50000
+
+  miri:
+    # Miri is an interpreter that detects undefined behavior in Rust terms
+    # (aliasing, out-of-bounds, uninitialized reads, invalid values). It is the
+    # closest real equivalent to UBSan for this crate.
+    #
+    # `cargo miri test` with no test target also runs the fuzz binary, which is
+    # a `harness = false` program defaulting to 20,000 iterations. Under Miri
+    # that takes many hours and is why this job kept being cancelled. Name the
+    # targets instead: the unit tests, plus a short mutation run so the input
+    # handling paths are still interpreted rather than only run natively.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - run: cargo miri test --locked --lib
+      - name: Miri mutation smoke
+        run: cargo miri test --locked --test fuzz -- 20

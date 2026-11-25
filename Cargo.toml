@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Zero-dependency DEFLATE/gzip decompressor (RFC 1951/1952) — stored, fixed and dynamic Huffman blocks, CRC-32 checked"
 license = "MIT"
+
+[[test]]
+name = "fuzz"
+path = "tests/fuzz.rs"
+harness = false
