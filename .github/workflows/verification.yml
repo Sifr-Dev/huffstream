@@ -55,9 +55,9 @@ jobs:
     #
     # `cargo miri test` with no test target also runs the fuzz binary, which is
     # a `harness = false` program defaulting to 20,000 iterations. Under Miri
-    # that takes many hours and is why this job kept being cancelled. Only the
-    # library unit tests run here; fuzzing stays in the native and sanitizer
-    # jobs, where it is fast.
+    # that takes many hours and is why this job kept being cancelled. Name the
+    # targets instead: the unit tests, plus a short mutation run so the input
+    # handling paths are still interpreted rather than only run natively.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -66,3 +66,5 @@ jobs:
         with:
           components: miri, rust-src
       - run: cargo miri test --locked --lib
+      - name: Miri mutation smoke
+        run: cargo miri test --locked --test fuzz -- 20
