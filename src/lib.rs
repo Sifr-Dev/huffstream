@@ -5,6 +5,9 @@
 use std::io::Read;
 
 pub const DEFAULT_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
+/// Default cap on the compressed bytes read from an input stream. It applies to
+/// files and standard input alike so that both paths enforce one bound.
+pub const DEFAULT_INPUT_LIMIT: usize = 64 * 1024 * 1024;
 
 struct BitReader<'a> {
     data: &'a [u8],
@@ -43,17 +46,23 @@ impl BitReader<'_> {
 struct Huffman {
     // Canonical codes arrive MSB-first, unlike the other DEFLATE bit fields.
     codes: Vec<(u32, u8, u16)>,
+    // Longest code in the tree. Decoding past it can never match, so the
+    // search stops there instead of always consuming fifteen bits.
+    max_length: u8,
+}
+
+/// Which Huffman alphabet a code belongs to. Incomplete codes are only
+/// tolerated for the literal/length and distance alphabets, and only as a
+/// single one-bit code; a code-length tree must always be complete.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Alphabet {
+    CodeLength,
+    LiteralLength,
+    Distance,
 }
 
 impl Huffman {
-    fn from_lengths(lengths: &[u8]) -> Result<Self, String> {
-        Self::from_lengths_with(lengths, false)
-    }
-
-    /// `allow_empty` accepts the all-zero distance tree that RFC 1951 permits
-    /// for a block containing only literals. The resulting tree decodes no
-    /// symbol, so any distance reference still fails as invalid.
-    fn from_lengths_with(lengths: &[u8], allow_empty: bool) -> Result<Self, String> {
+    fn from_lengths(lengths: &[u8], alphabet: Alphabet) -> Result<Self, String> {
         let mut counts = [0u16; 16];
         for &length in lengths {
             if length > 15 {
@@ -69,14 +78,25 @@ impl Huffman {
                 return Err("over-subscribed Huffman tree".into());
             }
         }
-        // RFC 1951 permits an incomplete code only in two cases: a distance
-        // tree with a single one-bit code, and a distance tree whose codes are
-        // all zero when the block contains no back-references. `allow_empty`
-        // selects the second case for the distance tree; the empty tree then
-        // decodes nothing, so any actual distance reference fails as invalid.
-        let used = lengths.iter().filter(|&&length| length != 0).count();
-        if left > 0 && !(allow_empty && used == 0) && used != 1 {
-            return Err("incomplete Huffman tree".into());
+        if left > 0 {
+            // Incomplete code. RFC 1951 section 3.2.7 permits only one
+            // incomplete code, and only for the distance alphabet: a single
+            // distance code of one bit. zlib additionally tolerates a literal
+            // or distance tree holding exactly one one-bit code, because such
+            // a tree still decodes unambiguously; rejecting data zlib accepts
+            // would make this decoder the outlier. A code-length tree must be
+            // complete, and a single code longer than one bit is rejected by
+            // both zlib and this decoder.
+            let used = lengths.iter().filter(|&&length| length != 0).count();
+            let single_one_bit_code =
+                alphabet != Alphabet::CodeLength && used == 1 && lengths.contains(&1);
+            // A distance tree with no codes at all is legal when the block uses
+            // no back-references. It decodes nothing, so the first distance
+            // reference still fails as an invalid code.
+            let empty_distance = alphabet == Alphabet::Distance && used == 0;
+            if !single_one_bit_code && !empty_distance {
+                return Err("incomplete Huffman tree".into());
+            }
         }
 
         let mut next = [0u32; 16];
@@ -86,18 +106,20 @@ impl Huffman {
             next[length] = code;
         }
         let mut codes = Vec::new();
+        let mut max_length = 0u8;
         for (symbol, &length) in lengths.iter().enumerate() {
             if length != 0 {
                 codes.push((next[usize::from(length)], length, symbol as u16));
                 next[usize::from(length)] += 1;
+                max_length = max_length.max(length);
             }
         }
-        Ok(Self { codes })
+        Ok(Self { codes, max_length })
     }
 
     fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16, String> {
         let mut code = 0u32;
-        for length in 1..=15u8 {
+        for length in 1..=self.max_length {
             code = (code << 1) | u32::from(reader.bit()?);
             if let Some(&(_, _, symbol)) = self
                 .codes
@@ -210,8 +232,8 @@ pub fn inflate_raw(data: &[u8], limit: usize) -> Result<(Vec<u8>, usize), String
             1 | 2 => {
                 let (literal, distance) = if block_type == 1 {
                     (
-                        Huffman::from_lengths(&fixed_literal_lengths())?,
-                        Huffman::from_lengths(&[5u8; 32])?,
+                        Huffman::from_lengths(&fixed_literal_lengths(), Alphabet::LiteralLength)?,
+                        Huffman::from_lengths(&[5u8; 32], Alphabet::Distance)?,
                     )
                 } else {
                     dynamic_trees(&mut reader)?
@@ -267,7 +289,7 @@ fn dynamic_trees(reader: &mut BitReader<'_>) -> Result<(Huffman, Huffman), Strin
     for &symbol in &CODE_LENGTH_ORDER[..code_count] {
         code_lengths[symbol] = reader.bits(3)? as u8;
     }
-    let code_tree = Huffman::from_lengths(&code_lengths)?;
+    let code_tree = Huffman::from_lengths(&code_lengths, Alphabet::CodeLength)?;
     if code_tree.codes.is_empty() {
         return Err("empty code-length tree".into());
     }
@@ -305,11 +327,11 @@ fn dynamic_trees(reader: &mut BitReader<'_>) -> Result<(Huffman, Huffman), Strin
             _ => return Err("invalid code-length symbol".into()),
         }
     }
-    let literal = Huffman::from_lengths(&lengths[..literal_count])?;
+    let literal = Huffman::from_lengths(&lengths[..literal_count], Alphabet::LiteralLength)?;
     if lengths.get(256).copied().unwrap_or(0) == 0 {
         return Err("literal tree has no end-of-block code".into());
     }
-    let distance = Huffman::from_lengths_with(&lengths[literal_count..], true)?;
+    let distance = Huffman::from_lengths(&lengths[literal_count..], Alphabet::Distance)?;
     Ok((literal, distance))
 }
 
@@ -382,6 +404,8 @@ pub fn decompress_gzip(data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
 
 /// Read an entire gzip member from short or arbitrarily divided reads, then
 /// decode it. This is buffered input, not incremental DEFLATE decompression.
+/// The reader is never asked for more than one byte past `input_limit`, so an
+/// oversized stream is refused without buffering all of it.
 pub fn decompress_gzip_reader(
     mut reader: impl Read,
     limit: usize,
@@ -390,26 +414,43 @@ pub fn decompress_gzip_reader(
     let mut data = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
+        let remaining = input_limit.saturating_sub(data.len());
+        if remaining == 0 {
+            // One more byte is enough to distinguish "exactly at the limit"
+            // from "over it"; a zero-length read ends the member normally.
+            let mut probe = [0u8; 1];
+            if reader
+                .read(&mut probe)
+                .map_err(|error| format!("cannot read gzip input: {error}"))?
+                != 0
+            {
+                return Err(exceeds_input_limit(input_limit));
+            }
+            break;
+        }
+        let want = remaining.min(buffer.len());
         let count = reader
-            .read(&mut buffer)
+            .read(&mut buffer[..want])
             .map_err(|error| format!("cannot read gzip input: {error}"))?;
         if count == 0 {
             break;
         }
-        let size = data
-            .len()
-            .checked_add(count)
-            .ok_or("compressed input size overflow")?;
-        if size > input_limit {
-            return Err(format!(
-                "compressed input exceeds limit of {input_limit} bytes"
-            ));
+        if count > want {
+            // A Read implementation must not report more bytes than requested.
+            return Err("gzip input reader returned more than requested".into());
         }
         data.try_reserve(count)
             .map_err(|_| "unable to allocate bounded input".to_string())?;
         data.extend_from_slice(&buffer[..count]);
+        if data.len() > input_limit {
+            return Err(exceeds_input_limit(input_limit));
+        }
     }
     decompress_gzip(&data, limit)
+}
+
+fn exceeds_input_limit(input_limit: usize) -> String {
+    format!("compressed input exceeds limit of {input_limit} bytes")
 }
 
 #[cfg(test)]
@@ -425,13 +466,45 @@ mod tests {
 
     #[test]
     fn rejects_invalid_huffman_trees() {
-        assert!(Huffman::from_lengths(&[1, 1, 1]).is_err());
-        assert!(Huffman::from_lengths(&[2, 2]).is_err());
-        assert!(Huffman::from_lengths(&[1]).is_ok());
-        assert!(Huffman::from_lengths(&[1, 1]).is_ok());
+        use Alphabet::{CodeLength, Distance, LiteralLength};
+        assert!(Huffman::from_lengths(&[1, 1, 1], LiteralLength).is_err());
+        assert!(Huffman::from_lengths(&[2, 2], LiteralLength).is_err());
+        assert!(Huffman::from_lengths(&[1], LiteralLength).is_ok());
+        assert!(Huffman::from_lengths(&[1, 1], LiteralLength).is_ok());
         // An all-zero distance tree is only legal for the distance alphabet.
-        assert!(Huffman::from_lengths(&[0, 0, 0]).is_err());
-        assert!(Huffman::from_lengths_with(&[0, 0, 0], true).is_ok());
+        assert!(Huffman::from_lengths(&[0, 0, 0], LiteralLength).is_err());
+        assert!(Huffman::from_lengths(&[0, 0, 0], CodeLength).is_err());
+        assert!(Huffman::from_lengths(&[0, 0, 0], Distance).is_ok());
+    }
+
+    #[test]
+    fn rejects_incomplete_codes_except_a_single_one_bit_code() {
+        use Alphabet::{CodeLength, Distance, LiteralLength};
+        // zlib enforces these with "invalid literal/lengths set", "invalid
+        // distances set" and "invalid code lengths set". Accepting any of them
+        // let non-conforming streams decode instead of failing.
+        for alphabet in [LiteralLength, Distance] {
+            assert!(Huffman::from_lengths(&[2], alphabet).is_err());
+            assert!(Huffman::from_lengths(&[15], alphabet).is_err());
+            assert!(Huffman::from_lengths(&[2, 2], alphabet).is_err());
+            assert!(Huffman::from_lengths(&[1, 2], alphabet).is_err());
+            assert!(Huffman::from_lengths(&[2, 2, 2], alphabet).is_err());
+            assert!(Huffman::from_lengths(&[2, 2, 3, 3], alphabet).is_err());
+            // A complete mix of one- and two-bit codes is fine.
+            assert!(Huffman::from_lengths(&[1, 2, 2], alphabet).is_ok());
+        }
+        // The one tolerated shape in both alphabets: a single one-bit code.
+        assert!(Huffman::from_lengths(&[1], LiteralLength).is_ok());
+        assert!(Huffman::from_lengths(&[1], Distance).is_ok());
+        assert!(Huffman::from_lengths(&[0, 0, 1], Distance).is_ok());
+        // A code-length tree must always be complete, even with one one-bit code.
+        assert!(Huffman::from_lengths(&[1], CodeLength).is_err());
+        assert!(Huffman::from_lengths(&[2], CodeLength).is_err());
+        assert!(Huffman::from_lengths(&[2, 2], CodeLength).is_err());
+        // Complete trees stay acceptable.
+        assert!(Huffman::from_lengths(&[1, 1], LiteralLength).is_ok());
+        assert!(Huffman::from_lengths(&[1, 1], Distance).is_ok());
+        assert!(Huffman::from_lengths(&[2, 2, 2, 2], Distance).is_ok());
     }
 
     #[test]
@@ -455,6 +528,103 @@ mod tests {
             0x03, 0x00, 0x00, 0x00,
         ];
         assert_eq!(decompress_gzip(&member, 64).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn incomplete_literal_tree_fixture_is_rejected() {
+        // Fixed stream in tests/fixtures: a dynamic block whose literal/length
+        // tree holds one two-bit code (end-of-block). RFC 1951 3.2.7 permits an
+        // incomplete code only as a single one-bit distance code, and zlib
+        // rejects this input with "invalid literal/lengths set". The old
+        // decoder accepted it because it allowed any single-code tree.
+        let member = include_bytes!("../tests/fixtures/incomplete_litlen.gz");
+        let raw = include_bytes!("../tests/fixtures/incomplete_litlen.raw");
+        let error = decompress_gzip(member, 1024).unwrap_err();
+        assert_eq!(error, "incomplete Huffman tree");
+        assert_eq!(inflate_raw(raw, 1024).unwrap_err(), error);
+    }
+
+    #[test]
+    fn incomplete_distance_tree_fixture_is_rejected() {
+        // Fixed stream in tests/fixtures: a used distance reference codes
+        // through a single two-bit distance code. zlib rejects it with
+        // "invalid distances set"; RFC 1951 3.2.7 allows only one one-bit
+        // distance code as an incomplete distance tree.
+        let member = include_bytes!("../tests/fixtures/incomplete_distance.gz");
+        let raw = include_bytes!("../tests/fixtures/incomplete_distance.raw");
+        let error = decompress_gzip(member, 1024).unwrap_err();
+        assert_eq!(error, "incomplete Huffman tree");
+        assert_eq!(inflate_raw(raw, 1024).unwrap_err(), error);
+    }
+
+    #[test]
+    fn single_one_bit_distance_code_fixture_decodes() {
+        // The legal counterpart of the fixture above: same block, but the lone
+        // distance code is one bit wide, which RFC 1951 permits. zlib also
+        // decodes it to b"AAAA".
+        let member = include_bytes!("../tests/fixtures/single_distance_code.gz");
+        assert_eq!(decompress_gzip(member, 1024).unwrap(), b"AAAA");
+    }
+
+    #[test]
+    fn reader_enforces_the_input_limit_without_buffering_past_it() {
+        let member = include_bytes!("../tests/fixtures/input_limit.gz");
+        let size = member.len();
+        let decoded = decompress_gzip(member, 8192).unwrap();
+        assert_eq!(decoded.len(), 4096);
+        // Exactly at the limit is accepted; one byte less is refused.
+        assert_eq!(
+            decompress_gzip_reader(&member[..], 8192, size).unwrap(),
+            decoded
+        );
+        let error = decompress_gzip_reader(&member[..], 8192, size - 1).unwrap_err();
+        assert_eq!(
+            error,
+            format!("compressed input exceeds limit of {} bytes", size - 1)
+        );
+        // Every prefix at or below the limit is either a complete member or a
+        // truncation error, never an input-limit error.
+        for end in 0..size {
+            let error = decompress_gzip_reader(&member[..end], 8192, size).err();
+            assert!(
+                error
+                    .as_deref()
+                    .is_none_or(|text| !text.starts_with("compressed input exceeds")),
+                "prefix {end}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reader_never_requests_more_than_the_limit() {
+        struct Counting<'a> {
+            data: &'a [u8],
+            pos: usize,
+            requested: usize,
+        }
+        impl Read for Counting<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.requested = self.requested.max(buffer.len());
+                let count = buffer.len().min(self.data.len() - self.pos);
+                buffer[..count].copy_from_slice(&self.data[self.pos..self.pos + count]);
+                self.pos += count;
+                Ok(count)
+            }
+        }
+        let member = include_bytes!("../tests/fixtures/input_limit.gz");
+        for limit in [0usize, 1, 7, 512, 4096, member.len() - 1] {
+            let mut source = Counting {
+                data: member,
+                pos: 0,
+                requested: 0,
+            };
+            assert!(decompress_gzip_reader(&mut source, 8192, limit).is_err());
+            assert!(
+                source.requested <= limit.max(1),
+                "limit {limit} requested {}",
+                source.requested
+            );
+        }
     }
 
     #[test]

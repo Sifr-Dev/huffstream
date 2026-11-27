@@ -13,8 +13,13 @@ boundaries and terminators, FHCRC, reserved gzip flags, CRC-32, ISIZE, exact
 member length, and compressed-input/output limits where configured.
 
 The CLI default decompressed-output limit is **64 MiB**, overridable with
-`--max-output`. Buffered stdin is capped at 64 MiB. Library callers must choose
-appropriate limits. Whole-file reads and whole-output buffering can still
+`--max-output`. The compressed-input limit is also **64 MiB** by default,
+overridable with `--max-input`, and it applies identically to a named file and to
+standard input; both paths are read through the same bounded reader. The reader
+stops one byte past the limit rather than buffering an oversized stream first.
+Library callers must choose appropriate limits. Because both defaults are 64 MiB,
+a member must fit inside 64 MiB compressed and 64 MiB decompressed; raise both
+limits together for larger inputs. Whole-file reads and whole-output buffering can still
 require substantial memory; no promise is made about a fixed memory ceiling,
 constant-time execution, sandboxing, or protection against all CPU-exhaustion
 inputs. Error strings contain format details but no compressed payload contents.
