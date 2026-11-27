@@ -427,7 +427,11 @@ mod tests {
     fn rejects_invalid_huffman_trees() {
         assert!(Huffman::from_lengths(&[1, 1, 1]).is_err());
         assert!(Huffman::from_lengths(&[2, 2]).is_err());
+        assert!(Huffman::from_lengths(&[2]).is_err());
+        assert!(Huffman::from_lengths(&[0, 0, 2]).is_err());
+        assert!(Huffman::from_lengths_with(&[2], true).is_err());
         assert!(Huffman::from_lengths(&[1]).is_ok());
+        assert!(Huffman::from_lengths_with(&[1], true).is_ok());
         assert!(Huffman::from_lengths(&[1, 1]).is_ok());
         // An all-zero distance tree is only legal for the distance alphabet.
         assert!(Huffman::from_lengths(&[0, 0, 0]).is_err());
@@ -455,6 +459,28 @@ mod tests {
             0x03, 0x00, 0x00, 0x00,
         ];
         assert_eq!(decompress_gzip(&member, 64).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn rejects_single_codes_longer_than_one_bit() {
+        // Complete literal tree (0, 'A', EOB), but one two-bit distance code.
+        // No distance is used. Python zlib rejects this with "invalid distances
+        // set"; accepting it just because no back-reference occurs is invalid.
+        let invalid_distance = b"\x05\xe0\x01\x09\x00\x00\x00\x80\x20\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xd8\xff\xff\xff\xff\x3f";
+        assert!(inflate_raw(&invalid_distance, 64).is_err());
+
+        // The end-of-block symbol has a two-bit code rather than the permitted
+        // single one-bit code. Python zlib rejects "invalid literal/lengths set".
+        let invalid_literal = b"\x05\xe0\x01\x09\x00\x00\x00\x80\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04";
+        assert!(inflate_raw(invalid_literal, 64).is_err());
+
+        // The valid one-bit counterpart decodes an empty stream.
+        let mut valid_literal = *invalid_literal;
+        valid_literal[73] = 0x08;
+        assert_eq!(inflate_raw(&valid_literal, 64).unwrap().0, b"");
+        for end in 0..invalid_distance.len() {
+            assert!(inflate_raw(&invalid_distance[..end], 64).is_err());
+        }
     }
 
     #[test]
