@@ -1,0 +1,9 @@
+{
+  "name": "huffstream",
+  "description": "DEFLATE/gzip decompressor with strict input limits",
+  "stack": [
+    "cargo"
+  ],
+  "status": "active",
+  "primary_language": "Rust"
+}
